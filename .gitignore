@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Test/cache artifacts
+.pytest_cache/
+
+# Local runtime files
+*.pid
+*.log
+
+# Local data and generated artifacts
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+
+# Browser and debug temporary directories
+.playwright-browsers/
+tmp_*/
+
+# Local screenshots and captures
+*.png
+
+# Local app state and one-off files
+.streamlit/
+tmp_import_results.json
+python-installer.exe
+
+# OS/editor
+.DS_Store
+Thumbs.db

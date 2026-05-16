@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>采集岗位</title>
+    <style>
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 16px;
+        font-family: "Microsoft YaHei", sans-serif;
+        background: #f6f7fb;
+        color: #1f2937;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0 0 12px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #4b5563;
+      }
+
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 10px;
+        padding: 12px 14px;
+        background: #ff4d4f;
+        color: #fff;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      #status {
+        margin-top: 12px;
+        min-height: 56px;
+        border-radius: 10px;
+        background: #fff;
+        padding: 10px 12px;
+        font-size: 13px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>采集当前岗位</h1>
+    <p>先在当前网页手动完成滑块或安全验证，再点击下方按钮，把页面截图和岗位信息一起写入本地 `http://127.0.0.1:8000`。</p>
+    <button id="capture">截图并导入当前页面</button>
+    <div id="status">等待操作。</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

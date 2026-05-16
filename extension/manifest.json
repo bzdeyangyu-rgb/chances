@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Chances Job Capture",
+  "version": "0.1.0",
+  "description": "Capture job details from supported recruitment sites into the local Chances workbook.",
+  "action": {
+    "default_title": "采集岗位",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "https://www.zhipin.com/*",
+    "https://*.zhipin.com/*",
+    "https://www.liepin.com/*",
+    "https://*.liepin.com/*",
+    "https://www.lagou.com/*",
+    "https://*.lagou.com/*",
+    "https://www.zhaopin.com/*",
+    "https://*.zhaopin.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/*",
+        "https://*.zhipin.com/*",
+        "https://www.liepin.com/*",
+        "https://*.liepin.com/*",
+        "https://www.lagou.com/*",
+        "https://*.lagou.com/*",
+        "https://www.zhaopin.com/*",
+        "https://*.zhaopin.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
