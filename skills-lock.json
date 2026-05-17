@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "bosszhipin": {
+      "source": "chasepassion/agent-computer-skill",
+      "sourceType": "github",
+      "skillPath": "bosszhipin/SKILL.md",
+      "computedHash": "13d5247f74be4abfcdd8054d0acc7d623fd9d685e23efc90b6dff2e241f22eab"
+    }
+  }
+}
