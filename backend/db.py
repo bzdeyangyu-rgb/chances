@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import mimetypes
 import sqlite3
 from pathlib import Path
@@ -234,6 +235,89 @@ def initialize_database(db_path: Path | str = DEFAULT_DB_PATH) -> Path:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS search_presets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                platform TEXT NOT NULL DEFAULT '',
+                city TEXT NOT NULL DEFAULT '',
+                query TEXT NOT NULL DEFAULT '',
+                salary TEXT NOT NULL DEFAULT '',
+                filters_json TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS job_score_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                score INTEGER NOT NULL DEFAULT 0,
+                recommendation TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '',
+                rubric_version TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS job_materials (
+                job_id INTEGER PRIMARY KEY,
+                resume_angle TEXT NOT NULL DEFAULT '',
+                project_highlights TEXT NOT NULL DEFAULT '',
+                recruiter_questions TEXT NOT NULL DEFAULT '',
+                interview_prep TEXT NOT NULL DEFAULT '',
+                communication_draft TEXT NOT NULL DEFAULT '',
+                risk_response TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS application_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL DEFAULT '',
+                channel TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS job_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                due_date TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS job_import_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                raw_payload_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS job_review_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                import_event_id INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                raw_payload_json TEXT NOT NULL DEFAULT '',
+                normalized_job_json TEXT NOT NULL DEFAULT '',
+                canonical_url TEXT NOT NULL DEFAULT '',
+                duplicate_job_id INTEGER,
+                decision TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT NOT NULL DEFAULT '',
+                job_id INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                decided_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(import_event_id) REFERENCES job_import_events(id) ON DELETE CASCADE,
+                FOREIGN KEY(duplicate_job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
+            );
             """
         )
         _ensure_jobs_columns(connection)
@@ -379,6 +463,380 @@ def list_jobs(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
     return [_job_row_to_dict(row) for row in rows]
 
 
+def list_jobs_page(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    status: str = "",
+    priority: str = "",
+    keyword: str = "",
+    platform: str = "",
+    has_screenshots: bool | None = None,
+) -> dict[str, Any]:
+    initialize_database(db_path)
+
+    safe_page = max(1, int(page or 1))
+    safe_page_size = max(1, min(int(page_size or 50), 200))
+    offset = (safe_page - 1) * safe_page_size
+    where_parts: list[str] = []
+    params: list[Any] = []
+
+    normalized_status = normalize_text(status)
+    if normalized_status:
+        where_parts.append("status = ?")
+        params.append(normalized_status)
+
+    normalized_priority = normalize_text(priority)
+    if normalized_priority:
+        where_parts.append("priority = ?")
+        params.append(normalized_priority)
+
+    normalized_platform = normalize_text(platform)
+    if normalized_platform:
+        where_parts.append("platform = ?")
+        params.append(normalized_platform)
+
+    normalized_keyword = normalize_text(keyword).lower()
+    if normalized_keyword:
+        where_parts.append(
+            """
+            (
+                lower(job_title) LIKE ?
+                OR lower(company_name) LIKE ?
+                OR lower(skills) LIKE ?
+                OR lower(main_text) LIKE ?
+                OR lower(visual_summary) LIKE ?
+            )
+            """
+        )
+        keyword_param = f"%{normalized_keyword}%"
+        params.extend([keyword_param] * 5)
+
+    if has_screenshots is True:
+        where_parts.append(
+            "EXISTS (SELECT 1 FROM job_capture_assets WHERE job_capture_assets.job_id = jobs.id)"
+        )
+    elif has_screenshots is False:
+        where_parts.append(
+            "NOT EXISTS (SELECT 1 FROM job_capture_assets WHERE job_capture_assets.job_id = jobs.id)"
+        )
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    with get_connection(db_path) as connection:
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM jobs {where_sql}",
+                params,
+            ).fetchone()[0]
+        )
+        rows = connection.execute(
+            f"""
+            SELECT {', '.join(JOB_SELECT_FIELDS)}
+            FROM jobs
+            {where_sql}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, safe_page_size, offset],
+        ).fetchall()
+
+    return {
+        "items": [_job_row_to_dict(row) for row in rows],
+        "total": total,
+        "page": safe_page,
+        "page_size": safe_page_size,
+    }
+
+
+def _search_preset_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": normalize_text(row["name"]),
+        "platform": normalize_text(row["platform"]),
+        "city": normalize_text(row["city"]),
+        "query": normalize_text(row["query"]),
+        "salary": normalize_text(row["salary"]),
+        "filters_json": normalize_text(row["filters_json"]),
+        "is_active": bool(row["is_active"]),
+        "created_at": normalize_text(row["created_at"]),
+        "updated_at": normalize_text(row["updated_at"]),
+    }
+
+
+def list_search_presets(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, platform, city, query, salary, filters_json,
+                   is_active, created_at, updated_at
+            FROM search_presets
+            WHERE is_active = 1
+            ORDER BY updated_at DESC, id DESC
+            """
+        ).fetchall()
+
+    return [_search_preset_row_to_dict(row) for row in rows]
+
+
+def save_search_preset(payload: dict[str, Any], db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any]:
+    initialize_database(db_path)
+    normalized = {
+        "name": normalize_text(payload.get("name")),
+        "platform": normalize_text(payload.get("platform")),
+        "city": normalize_text(payload.get("city")),
+        "query": normalize_text(payload.get("query")),
+        "salary": normalize_text(payload.get("salary")),
+        "filters_json": normalize_text(payload.get("filters_json")),
+    }
+
+    if not normalized["name"]:
+        raise ValueError("搜索预设名称不能为空")
+
+    with get_connection(db_path) as connection:
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO search_presets (
+                    name, platform, city, query, salary, filters_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized["name"],
+                    normalized["platform"],
+                    normalized["city"],
+                    normalized["query"],
+                    normalized["salary"],
+                    normalized["filters_json"],
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("搜索预设名称已存在") from exc
+
+        row = connection.execute(
+            """
+            SELECT id, name, platform, city, query, salary, filters_json,
+                   is_active, created_at, updated_at
+            FROM search_presets
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return _search_preset_row_to_dict(row)
+
+
+def delete_search_preset(preset_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> bool:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            "DELETE FROM search_presets WHERE id = ?",
+            (preset_id,),
+        )
+
+    return cursor.rowcount > 0
+
+
+def _review_candidate_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        normalized_job = json.loads(normalize_text(row["normalized_job_json"]) or "{}")
+    except json.JSONDecodeError:
+        normalized_job = {}
+    return {
+        "id": row["id"],
+        "import_event_id": row["import_event_id"],
+        "source": normalize_text(row["source"]),
+        "normalized_job": normalized_job,
+        "canonical_url": normalize_text(row["canonical_url"]),
+        "duplicate_job_id": row["duplicate_job_id"],
+        "decision": normalize_text(row["decision"]),
+        "reason": normalize_text(row["reason"]),
+        "job_id": row["job_id"],
+        "created_at": normalize_text(row["created_at"]),
+        "decided_at": normalize_text(row["decided_at"]),
+        **normalized_job,
+    }
+
+
+def create_import_review_candidates(
+    source: str,
+    items: list[dict[str, Any]],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    initialize_database(db_path)
+    normalized_source = normalize_text(source) or "manual"
+    raw_payload_json = json.dumps({"source": normalized_source, "items": items}, ensure_ascii=False)
+    created_candidates: list[dict[str, Any]] = []
+
+    with get_connection(db_path) as connection:
+        event_cursor = connection.execute(
+            """
+            INSERT INTO job_import_events (source, raw_payload_json)
+            VALUES (?, ?)
+            """,
+            (normalized_source, raw_payload_json),
+        )
+        import_event_id = int(event_cursor.lastrowid)
+
+        for item in items:
+            normalized_job = normalize_job_payload({**item, "source_type": normalized_source})
+            canonical_url = canonicalize_job_url(normalized_job.get("job_url", ""))
+            duplicate = connection.execute(
+                "SELECT id FROM jobs WHERE job_url = ?",
+                (canonical_url,),
+            ).fetchone()
+            duplicate_job_id = int(duplicate["id"]) if duplicate else None
+            cursor = connection.execute(
+                """
+                INSERT INTO job_review_decisions (
+                    import_event_id, source, raw_payload_json, normalized_job_json,
+                    canonical_url, duplicate_job_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    import_event_id,
+                    normalized_source,
+                    json.dumps(item, ensure_ascii=False),
+                    json.dumps(normalized_job, ensure_ascii=False),
+                    canonical_url,
+                    duplicate_job_id,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id, import_event_id, source, raw_payload_json, normalized_job_json,
+                       canonical_url, duplicate_job_id, decision, reason, job_id,
+                       created_at, decided_at
+                FROM job_review_decisions
+                WHERE id = ?
+                """,
+                (cursor.lastrowid,),
+            ).fetchone()
+            created_candidates.append(_review_candidate_row_to_dict(row))
+
+    return {
+        "import_event_id": import_event_id,
+        "created_count": len(created_candidates),
+        "candidates": created_candidates,
+    }
+
+
+def list_import_review_candidates(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    *,
+    decision: str = "pending",
+) -> list[dict[str, Any]]:
+    initialize_database(db_path)
+    normalized_decision = normalize_text(decision)
+    where_sql = "WHERE decision = ?" if normalized_decision else ""
+    params = [normalized_decision] if normalized_decision else []
+
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, import_event_id, source, raw_payload_json, normalized_job_json,
+                   canonical_url, duplicate_job_id, decision, reason, job_id,
+                   created_at, decided_at
+            FROM job_review_decisions
+            {where_sql}
+            ORDER BY created_at DESC, id DESC
+            """,
+            params,
+        ).fetchall()
+
+    return [_review_candidate_row_to_dict(row) for row in rows]
+
+
+def accept_import_review_candidate(
+    candidate_id: int,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT id, import_event_id, source, raw_payload_json, normalized_job_json,
+                   canonical_url, duplicate_job_id, decision, reason, job_id,
+                   created_at, decided_at
+            FROM job_review_decisions
+            WHERE id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        candidate = _review_candidate_row_to_dict(row)
+
+    result = upsert_job_record(candidate["normalized_job"], db_path)
+    job_id = int(result["id"])
+
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE job_review_decisions
+            SET decision = 'accepted',
+                job_id = ?,
+                decided_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (job_id, candidate_id),
+        )
+        updated = connection.execute(
+            """
+            SELECT id, import_event_id, source, raw_payload_json, normalized_job_json,
+                   canonical_url, duplicate_job_id, decision, reason, job_id,
+                   created_at, decided_at
+            FROM job_review_decisions
+            WHERE id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+
+    return _review_candidate_row_to_dict(updated)
+
+
+def reject_import_review_candidate(
+    candidate_id: int,
+    reason: str = "",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        existing = connection.execute("SELECT id FROM job_review_decisions WHERE id = ?", (candidate_id,)).fetchone()
+        if existing is None:
+            return None
+        connection.execute(
+            """
+            UPDATE job_review_decisions
+            SET decision = 'rejected',
+                reason = ?,
+                decided_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (normalize_text(reason), candidate_id),
+        )
+        updated = connection.execute(
+            """
+            SELECT id, import_event_id, source, raw_payload_json, normalized_job_json,
+                   canonical_url, duplicate_job_id, decision, reason, job_id,
+                   created_at, decided_at
+            FROM job_review_decisions
+            WHERE id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+
+    return _review_candidate_row_to_dict(updated)
+
+
 def get_job(job_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any] | None:
     initialize_database(db_path)
 
@@ -448,6 +906,350 @@ def get_job_evaluation(job_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> di
         "next_step_hint": normalize_text(row["next_step_hint"]),
         "updated_at": normalize_text(row["updated_at"]),
     }
+
+
+def _score_snapshot_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result_json = normalize_text(row["result_json"])
+    try:
+        result = json.loads(result_json) if result_json else {}
+    except json.JSONDecodeError:
+        result = {}
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "score": int(row["score"]),
+        "recommendation": normalize_text(row["recommendation"]),
+        "result": result,
+        "rubric_version": normalize_text(row["rubric_version"]),
+        "created_at": normalize_text(row["created_at"]),
+    }
+
+
+def save_job_score_snapshot(
+    job_id: int,
+    result: dict[str, Any],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        existing_job = connection.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if existing_job is None:
+            return None
+
+        cursor = connection.execute(
+            """
+            INSERT INTO job_score_snapshots (
+                job_id, score, recommendation, result_json, rubric_version
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                int(result.get("score", 0) or 0),
+                normalize_text(result.get("recommendation")),
+                json.dumps(result, ensure_ascii=False),
+                normalize_text(result.get("rubric_version")),
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT id, job_id, score, recommendation, result_json, rubric_version, created_at
+            FROM job_score_snapshots
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return _score_snapshot_row_to_dict(row)
+
+
+def list_job_score_snapshots(job_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, job_id, score, recommendation, result_json, rubric_version, created_at
+            FROM job_score_snapshots
+            WHERE job_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (job_id,),
+        ).fetchall()
+
+    return [_score_snapshot_row_to_dict(row) for row in rows]
+
+
+def get_latest_job_score_snapshot(job_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    snapshots = list_job_score_snapshots(job_id, db_path)
+    return snapshots[0] if snapshots else None
+
+
+def _materials_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "job_id": row["job_id"],
+        "resume_angle": normalize_text(row["resume_angle"]),
+        "project_highlights": normalize_text(row["project_highlights"]),
+        "recruiter_questions": normalize_text(row["recruiter_questions"]),
+        "interview_prep": normalize_text(row["interview_prep"]),
+        "communication_draft": normalize_text(row["communication_draft"]),
+        "risk_response": normalize_text(row["risk_response"]),
+        "updated_at": normalize_text(row["updated_at"]),
+    }
+
+
+def get_job_materials(job_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT job_id, resume_angle, project_highlights, recruiter_questions,
+                   interview_prep, communication_draft, risk_response, updated_at
+            FROM job_materials
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    return _materials_row_to_dict(row) if row else None
+
+
+def save_job_materials(
+    job_id: int,
+    payload: dict[str, Any],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+    normalized = {
+        "resume_angle": normalize_text(payload.get("resume_angle")),
+        "project_highlights": normalize_text(payload.get("project_highlights")),
+        "recruiter_questions": normalize_text(payload.get("recruiter_questions")),
+        "interview_prep": normalize_text(payload.get("interview_prep")),
+        "communication_draft": normalize_text(payload.get("communication_draft")),
+        "risk_response": normalize_text(payload.get("risk_response")),
+    }
+
+    with get_connection(db_path) as connection:
+        existing_job = connection.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if existing_job is None:
+            return None
+
+        connection.execute(
+            """
+            INSERT INTO job_materials (
+                job_id, resume_angle, project_highlights, recruiter_questions,
+                interview_prep, communication_draft, risk_response, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(job_id) DO UPDATE SET
+                resume_angle = excluded.resume_angle,
+                project_highlights = excluded.project_highlights,
+                recruiter_questions = excluded.recruiter_questions,
+                interview_prep = excluded.interview_prep,
+                communication_draft = excluded.communication_draft,
+                risk_response = excluded.risk_response,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                job_id,
+                normalized["resume_angle"],
+                normalized["project_highlights"],
+                normalized["recruiter_questions"],
+                normalized["interview_prep"],
+                normalized["communication_draft"],
+                normalized["risk_response"],
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT job_id, resume_angle, project_highlights, recruiter_questions,
+                   interview_prep, communication_draft, risk_response, updated_at
+            FROM job_materials
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    return _materials_row_to_dict(row)
+
+
+def _application_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "event_type": normalize_text(row["event_type"]),
+        "channel": normalize_text(row["channel"]),
+        "note": normalize_text(row["note"]),
+        "event_at": normalize_text(row["event_at"]),
+        "created_at": normalize_text(row["created_at"]),
+    }
+
+
+def add_application_event(
+    job_id: int,
+    payload: dict[str, Any],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+    normalized = {
+        "event_type": normalize_text(payload.get("event_type")),
+        "channel": normalize_text(payload.get("channel")),
+        "note": normalize_text(payload.get("note")),
+        "event_at": normalize_text(payload.get("event_at")),
+    }
+
+    with get_connection(db_path) as connection:
+        existing_job = connection.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if existing_job is None:
+            return None
+
+        cursor = connection.execute(
+            """
+            INSERT INTO application_events (
+                job_id, event_type, channel, note, event_at
+            )
+            VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+            """,
+            (
+                job_id,
+                normalized["event_type"],
+                normalized["channel"],
+                normalized["note"],
+                normalized["event_at"],
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT id, job_id, event_type, channel, note, event_at, created_at
+            FROM application_events
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return _application_event_row_to_dict(row)
+
+
+def list_application_events(job_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, job_id, event_type, channel, note, event_at, created_at
+            FROM application_events
+            WHERE job_id = ?
+            ORDER BY event_at DESC, id DESC
+            """,
+            (job_id,),
+        ).fetchall()
+
+    return [_application_event_row_to_dict(row) for row in rows]
+
+
+def _job_task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "job_id": row["job_id"],
+        "title": normalize_text(row["title"]),
+        "due_date": normalize_text(row["due_date"]),
+        "status": normalize_text(row["status"]),
+        "created_at": normalize_text(row["created_at"]),
+        "completed_at": normalize_text(row["completed_at"]),
+    }
+
+
+def create_job_task(
+    job_id: int,
+    payload: dict[str, Any],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+    normalized = {
+        "title": normalize_text(payload.get("title")),
+        "due_date": normalize_text(payload.get("due_date")),
+    }
+
+    with get_connection(db_path) as connection:
+        existing_job = connection.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if existing_job is None:
+            return None
+
+        cursor = connection.execute(
+            """
+            INSERT INTO job_tasks (job_id, title, due_date)
+            VALUES (?, ?, ?)
+            """,
+            (job_id, normalized["title"], normalized["due_date"]),
+        )
+        row = connection.execute(
+            """
+            SELECT id, job_id, title, due_date, status, created_at, completed_at
+            FROM job_tasks
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return _job_task_row_to_dict(row)
+
+
+def list_job_tasks(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    *,
+    job_id: int | None = None,
+    status: str = "",
+) -> list[dict[str, Any]]:
+    initialize_database(db_path)
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if job_id is not None:
+        where_parts.append("job_id = ?")
+        params.append(job_id)
+    normalized_status = normalize_text(status)
+    if normalized_status:
+        where_parts.append("status = ?")
+        params.append(normalized_status)
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, job_id, title, due_date, status, created_at, completed_at
+            FROM job_tasks
+            {where_sql}
+            ORDER BY status ASC, due_date ASC, id DESC
+            """,
+            params,
+        ).fetchall()
+
+    return [_job_task_row_to_dict(row) for row in rows]
+
+
+def complete_job_task(task_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE job_tasks
+            SET status = 'done', completed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+        row = connection.execute(
+            """
+            SELECT id, job_id, title, due_date, status, created_at, completed_at
+            FROM job_tasks
+            WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+
+    return _job_task_row_to_dict(row) if row else None
 
 
 def save_job_evaluation(job_id: int, payload: dict[str, Any], db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any] | None:
@@ -597,12 +1399,50 @@ def build_weekly_review(db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, Any]
         status_counts[status] = status_counts.get(status, 0) + 1
 
     todo_statuses = {"待评估", "建议推进", "待准备材料", "待沟通", "待投递"}
+    open_tasks = list_job_tasks(db_path, status="open")
+    stalled_jobs = [
+        job
+        for job in jobs
+        if job.get("status") in todo_statuses
+        and normalize_text(job.get("next_action"))
+    ][:10]
+
+    with get_connection(db_path) as connection:
+        event_rows = connection.execute(
+            """
+            SELECT event_type, COUNT(*) AS count
+            FROM application_events
+            GROUP BY event_type
+            """
+        ).fetchall()
+
+    application_event_counts = {
+        normalize_text(row["event_type"]) or "未分类": int(row["count"])
+        for row in event_rows
+    }
+
+    recommendations: list[str] = []
+    if open_tasks:
+        recommendations.append(f"先处理 {len(open_tasks)} 个未完成跟进任务。")
+    if stalled_jobs:
+        recommendations.append(f"复核 {len(stalled_jobs)} 个仍待推进的岗位，决定推进或归档。")
+    high_priority_jobs = [job for job in jobs if job.get("priority") == "高"]
+    if high_priority_jobs:
+        recommendations.append(f"优先处理 {len(high_priority_jobs)} 个高优岗位。")
+    if not recommendations:
+        recommendations.append("本周暂无明显阻塞，继续补充新岗位并保持节奏。")
+
     return {
         "total_jobs": len(jobs),
         "todo_jobs": sum(1 for job in jobs if job.get("status") in todo_statuses),
         "applied_jobs": sum(1 for job in jobs if job.get("status") == "已投递"),
-        "high_priority_jobs": sum(1 for job in jobs if job.get("priority") == "高"),
+        "high_priority_jobs": len(high_priority_jobs),
         "status_counts": status_counts,
+        "pipeline_counts": status_counts,
+        "application_event_counts": application_event_counts,
+        "open_tasks": open_tasks,
+        "stalled_jobs": stalled_jobs,
+        "recommendations": recommendations,
     }
 
 
@@ -747,6 +1587,33 @@ def save_job_capture_assets(
                 }
             )
     return saved_assets
+
+
+def update_job_visual_summary(
+    job_id: int,
+    visual_summary: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+    status: str = "ready",
+) -> dict[str, Any] | None:
+    initialize_database(db_path)
+
+    with get_connection(db_path) as connection:
+        existing_job = connection.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if existing_job is None:
+            return None
+
+        connection.execute(
+            """
+            UPDATE jobs
+            SET visual_summary = ?,
+                visual_summary_status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (normalize_text(visual_summary), normalize_text(status) or "ready", job_id),
+        )
+
+    return get_job(job_id, db_path)
 
 
 def upsert_job_record(payload: dict[str, Any], db_path: Path | str = DEFAULT_DB_PATH) -> dict[str, str | int]:

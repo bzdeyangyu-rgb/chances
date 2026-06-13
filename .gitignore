@@ -29,9 +29,17 @@ tmp_*/
 *.png
 
 # Local app state and one-off files
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 tmp_import_results.json
 python-installer.exe
+
+# Local backups and runtime scratch files
+backups/
+runtime/
+
+# Local Claude compatibility junction; source lives in .agents/skills/bosszhipin
+.claude/skills/bosszhipin/
 
 # OS/editor
 .DS_Store

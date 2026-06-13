@@ -1,4 +1,9 @@
-from frontend.app import build_entry_actions, build_home_metrics, build_status_rows
+from frontend.app import (
+    build_entry_actions,
+    build_home_followup_summary,
+    build_home_metrics,
+    build_status_rows,
+)
 
 
 def test_build_home_metrics_returns_core_counts():
@@ -32,3 +37,15 @@ def test_build_entry_actions_prioritizes_profile_and_evaluation_work():
     assert cards[0]["title"] == "先完善个人画像"
     assert cards[1]["title"] == "优先处理待评估岗位"
     assert cards[2]["target_page"] == "岗位池"
+
+
+def test_build_home_followup_summary_mentions_tasks_and_stalled_jobs():
+    summary = build_home_followup_summary(
+        {
+            "open_tasks": [{"title": "跟进 HR 回复"}],
+            "stalled_jobs": [{"job_title": "AI产品经理"}],
+        }
+    )
+
+    assert any("跟进 HR 回复" in item for item in summary)
+    assert any("AI产品经理" in item for item in summary)

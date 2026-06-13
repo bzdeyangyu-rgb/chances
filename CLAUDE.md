@@ -1,6 +1,12 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+这份文件用于说明 Claude Code / Codex 在本仓库中协作时需要遵守的项目约定。
+
+## 沟通语言
+
+- 默认使用中文回复用户。
+- 除非用户明确要求英文，否则项目说明、进度总结、计划和最终反馈都使用中文。
+- 文件名、目录名、API 路径、函数名、测试名、命令和第三方项目名可以保留英文或代码格式。
 
 ## 项目概览
 

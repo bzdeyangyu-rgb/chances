@@ -12,6 +12,18 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function formatCaptureError(error) {
+  const message = String(error?.message || error || "").trim();
+  if (
+    message.includes("Failed to fetch") ||
+    message.includes("NetworkError") ||
+    message.includes("ERR_CONNECTION_REFUSED")
+  ) {
+    return "本地服务未启动。请先双击项目目录中的 Start-Chances.cmd，再重新采集。";
+  }
+  return message || "采集失败，请刷新岗位页面后重试。";
+}
+
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) {
@@ -160,7 +172,7 @@ captureButton.addEventListener("click", async () => {
     const company = result.job?.company_name || capture.job.company_name;
     setStatus(`${resultMessage}\n\n${title}\n${company}`);
   } catch (error) {
-    setStatus(error.message || "采集失败。", true);
+    setStatus(formatCaptureError(error), true);
   } finally {
     captureButton.disabled = false;
   }

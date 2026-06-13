@@ -48,6 +48,22 @@ STATUS_OPTIONS = [
 
 PRIORITY_OPTIONS = ["高", "普通", "低"]
 
+APPLICATION_EVENT_LABELS = {
+    "applied": "已投递",
+    "greeted": "已打招呼",
+    "replied": "收到回复",
+    "interview_scheduled": "已约面试",
+    "interview_done": "已完成面试",
+    "rejected": "已被拒绝",
+    "offer": "收到录用",
+    "abandoned": "主动放弃",
+}
+
+TASK_STATUS_LABELS = {
+    "open": "待完成",
+    "completed": "已完成",
+}
+
 
 CAPTURE_ASSET_LABELS = {
     "visible": "页面截图",
@@ -74,9 +90,13 @@ UI_TEXT = {
     "page_title": "求职作战台",
     "nav_home": "首页总览",
     "nav_jobs": "岗位池",
+    "nav_import": "搜索与导入",
+    "nav_weekly": "周复盘",
     "nav_profile": "个人画像",
     "home_metrics_title": "机会总览",
     "jobs_board_title": "岗位池",
+    "import_review_title": "搜索与导入",
+    "weekly_review_title": "周复盘",
     "profile_title": "个人画像",
     "api_error": "无法连接本地接口，请先启动 FastAPI 服务。",
     "save_profile": "保存画像",
